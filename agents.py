@@ -17,6 +17,9 @@ import random
 import pickle
 from collections import defaultdict
 
+import torch                              # 阶段5 起：DQN 要用神经网络
+from qnet import encode_board, QNetwork   # 复用 5.1 写好的「棋盘编码 + Q 网络」
+
 
 class RandomAgent:
     """随机玩家：完全不看局面，从所有合法动作里瞎挑一个。"""
@@ -129,3 +132,86 @@ class HumanAgent:
                 print("  ⚠️ 这个位置不能下（越界或已被占），换一个")
                 continue
             return move
+
+
+class DQNAgent:
+    """
+    DQN 玩家（阶段 5.2）：随身带一个 Q 网络(QNetwork)。
+    看一眼棋盘 → 网络给【每个格子】打一个分(Q) → 在合法格子里按 ε-贪婪挑一个落子。
+
+    和 QAgent 最大的区别：
+        · QAgent 用「查表」记分 —— 没见过的局面只能抓瞎；
+        · DQNAgent 用「神经网络」算分 —— 能对没见过的局面做泛化推断。
+    ⚠️ 本阶段网络【还没训练】，所以打分是乱的、棋力≈随机。这一步只为把「接线」搭通：
+       证明它能正确地"判断该谁下 → 算分 → 盖住非法格 → 选点"，能直接塞进 play_game。
+
+    接口仍是 select_action(state, legal_actions)，和别的 agent 完全一致。
+    """
+
+    def __init__(self, board_size, name="DQN玩家", epsilon=0.1,
+                 net=None, device=None, seed=None):
+        self.name = name
+        self.board_size = board_size
+        self.epsilon = epsilon                 # ε-贪婪的探索概率
+        self.rng = random.Random(seed)         # 自带随机源，传 seed 可复现
+
+        # —— 设备：有苹果 MPS(Metal) 就用 MPS，否则用 CPU ——
+        # （这台 Mac 没有 N 卡，所以【不写 cuda】；本项目很小，CPU/MPS 都够快）
+        if device is None:
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+        self.device = torch.device(device)
+
+        # 持有一个 Q 网络；不传就新建一个（此刻是随机初始化、未训练的）
+        self.net = net if net is not None else QNetwork(board_size)
+        self.net.to(self.device)
+        self.net.eval()                        # 推断模式：本阶段只用来选动作，不训练
+
+    @staticmethod
+    def _infer_player(state):
+        """
+        接口里没给「现在轮到谁」，得自己从棋盘【数子】推断（黑 1 先手、白 2 后手）：
+            黑子数 == 白子数      → 轮到黑(1)   （刚开局 0==0 也成立）
+            黑子数 == 白子数 + 1  → 轮到白(2)
+            其它                 → 不可能出现的合法局面 → 直接报错，把 bug 挡在早处
+        （正常交替落子下，黑子要么和白子一样多、要么只多一个；
+          若出现「白比黑多」或「黑比白多 2+」，一定是上游哪里把棋盘传错了。）
+        """
+        black = int((state == 1).sum())        # 1 = 黑子
+        white = int((state == 2).sum())        # 2 = 白子
+        if black == white:
+            return 1                           # 轮到黑
+        if black == white + 1:
+            return 2                           # 轮到白
+        raise ValueError(
+            f"非法局面：黑子 {black} 个、白子 {white} 个，无法推断该谁下"
+            f"（黑白子数应相等，或黑只比白多 1）。"
+        )
+
+    def select_action(self, state, legal_actions):
+        """ε-贪婪：以 epsilon 概率随机合法走；否则选「合法格里 Q 最高」的那个。"""
+        # —— 探索：以 epsilon 概率，随便挑一个合法位置 ——
+        if self.rng.random() < self.epsilon:
+            return self.rng.choice(legal_actions)
+
+        # —— 利用：让网络给每个格子打分，再【只在合法格里】挑最高 ——
+        player = self._infer_player(state)         # ① 先搞清楚此刻该谁下
+        x = encode_board(state, player)            # ② 编码成 (2, H, W)：我方/对方两张图
+        x = x.unsqueeze(0).to(self.device)         #    加 batch 维 → (1, 2, H, W) 并搬到设备
+
+        with torch.no_grad():                      # 只前向、不求梯度（推断更快更省内存）
+            q = self.net(x)[0].cpu()               # ③ → (n_cells,) 搬回 CPU 方便逐格取值
+
+        # ④ 屏蔽非法落子：只遍历【合法动作】，绝不会选到已占/越界的格
+        W = self.board_size
+        best_q = None
+        best_actions = []
+        for (r, c) in legal_actions:
+            qa = q[r * W + c].item()               # 格子编号 = row * W + col
+            if best_q is None or qa > best_q:
+                best_q = qa
+                best_actions = [(r, c)]
+            elif qa == best_q:
+                best_actions.append((r, c))        # 并列最高，先都收着
+
+        # ⑤ 多个并列最高就随机挑一个（和 QAgent 同款，避免老固定选第一个的偏置）
+        return self.rng.choice(best_actions)

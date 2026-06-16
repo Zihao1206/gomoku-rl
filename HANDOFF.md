@@ -23,9 +23,17 @@
 
 ## 3. 环境与运行
 
-- conda 环境 **`gomoku`**（Python 3.11）。依赖：`numpy 2.4.6`、`matplotlib`、`tqdm`、**`torch 2.12.0+cu130`（CUDA 可用，显卡 RTX 4070）**。
-- 跑代码用该环境的 python：`/home/zh/anaconda3/envs/gomoku/bin/python 文件.py`，或先 `conda activate gomoku`。
-- ⚠️ **已知坑**：学生 shell 里 source 了 ROS，`PYTHONPATH` 带着 ROS/系统包（pip 装 torch 时报过 launch-ros 的无害警告）。若出现「莫名 import 到系统/ROS 包」的怪事，先 `unset PYTHONPATH` 再跑。
+> 本项目最初在 **Linux + RTX 4070** 上开发；2026-06 起迁移到一台 **M1 Mac** 继续。两台机器都能跑，主要差别是「设备」（CUDA vs MPS）。
+
+**当前机器（M1 Mac）：**
+- 项目路径：`/Users/shenzihao/zh/gomoku`（= git 仓库根 = 工作目录）。
+- conda 环境 **`gomoku`**（Python 3.11，用 brew 装的 Miniforge）。依赖：`numpy 2.4.6`、**`torch 2.12.0`（arm64 Mac 版，无 CUDA）**、`matplotlib`、`tqdm`。
+- 运行：先 `conda activate gomoku`，再 `python 文件.py`（或一行 `conda run -n gomoku python 文件.py`）。
+- **设备：没有 N 卡 → 用 MPS(Metal)/CPU**。`torch.backends.mps.is_available()` == True。写训练/推断代码时设备一律 `device = "mps" if torch.backends.mps.is_available() else "cpu"`，**不要写 `cuda`**。本项目很小，CPU/MPS 都绰绰有余。
+
+**旧机器（Linux + RTX 4070，历史参考）：**
+- python 路径 `/home/zh/anaconda3/envs/gomoku/bin/python`；torch `2.12.0+cu130`（CUDA 可用）。
+- ⚠️ 已知坑：shell 里 source 了 ROS，`PYTHONPATH` 带着 ROS/系统包；若出现「莫名 import 到系统/ROS 包」的怪事，先 `unset PYTHONPATH` 再跑。
 - Git：**https://github.com/Zihao1206/gomoku-rl** （public，main 分支）。`*.pkl` 模型不入库，跑 `train.py` 可重新生成。
 - 习惯：每完成一个阶段，**经学生同意后** `commit + push`（提交信息用中文，结尾带 `Co-Authored-By`）。
 
@@ -76,7 +84,7 @@
 - **经验回放**：用 `deque` 存转移 `(state, player, action_idx, reward, next_state, next_player, next_legal, done)`；训练时随机抽 batch。
 - **目标网络**：`QNetwork` 的一个副本，每隔 N 步同步一次；用它算目标 `target = r + γ·max_合法 Q_target(s',·)`（终局则 `target = r`）。
 - **两人对弈细节**：`s'` 仍是「该玩家**再次轮到**时」的局面（对手当环境），**与 `train.py` 的功劳分配完全一致**；输家 −1 同样在收集转移时按终局规则给。
-- **损失** = `MSE(预测 Q(s, action), target)`；优化器 Adam（lr≈1e-3）；张量/网络 `.to(device)` 用 GPU。
+- **损失** = `MSE(预测 Q(s, action), target)`；优化器 Adam（lr≈1e-3）；张量/网络 `.to(device)`（本机 Mac：`device = "mps" if torch.backends.mps.is_available() else "cpu"`，**不要用 cuda**）。
 - **验证路径**：先在**小棋盘（3×3 或 4×4）**训，对照表格法基线（应也能打到≈0 负），证明 DQN 没写错；**再放大到 5×5/6×6**——表格法在那已崩，看 DQN 靠泛化扛住。
 - 网络存取用 `torch.save(net.state_dict(), ...)`。
 
