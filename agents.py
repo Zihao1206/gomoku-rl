@@ -215,3 +215,12 @@ class DQNAgent:
 
         # ⑤ 多个并列最高就随机挑一个（和 QAgent 同款，避免老固定选第一个的偏置）
         return self.rng.choice(best_actions)
+
+    def save(self, path):
+        """把网络参数存到磁盘（torch 存的是 state_dict；和 QAgent 用 pickle 存 Q 表一个道理）。"""
+        torch.save(self.net.state_dict(), path)
+
+    def load(self, path):
+        """从磁盘读回网络参数（需先用【相同 board_size】建好网络，再灌参数）。"""
+        self.net.load_state_dict(torch.load(path, map_location=self.device))
+        self.net.eval()

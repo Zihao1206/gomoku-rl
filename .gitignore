@@ -4,8 +4,9 @@ __pycache__/
 *.egg-info/
 .ipynb_checkpoints/
 
-# 训练产物（可由 train.py 重新生成，故不入库）
+# 训练产物（train.py / train_dqn.py 可重新生成，故不入库）
 *.pkl
+*.pt
 
 # 本地工具 / 编辑器配置
 .claude/

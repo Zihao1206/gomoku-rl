@@ -53,12 +53,16 @@
 | 文件 | 内容 |
 |------|------|
 | `gomoku_env.py` | `GomokuEnv(board_size, win_length)`。`reset()`→state；`step(action)`→`(state, reward, done, info)`（Gym 风格）；`legal_actions()`→`[(r,c),...]`；`render()`；`_check_win`（只查最后落子、横竖斜 4 方向两边数）；`_in_board`。|
-| `agents.py` | `RandomAgent`；`QAgent`（`epsilon/alpha/gamma`、`select_action` ε-贪婪、`update` 标准 Q 公式、`save/load` pickle、`_state_key=board.tobytes()`）；`HumanAgent`（键盘输入）。|
+| `agents.py` | `RandomAgent`；`QAgent`（ε-贪婪、`update`、`save/load` pickle、`_state_key=board.tobytes()`）；`HumanAgent`（键盘输入）；**`DQNAgent`**（持 `QNetwork`、数子推断玩家、网络算 Q + 盖非法格 + ε-贪婪、`save/load` 用 `torch.save` 存 `state_dict`、设备 mps/cpu）。|
 | `play.py` | `play_game(env, black_agent, white_agent, render)`→winner；`__main__` 跑随机对随机统计。|
 | `train.py` | `play_one_selfplay_game`（自我对弈+学习，功劳分配见 §5）；`evaluate`（ε=0、复用 play_game、不学习）；`train_selfplay`（ε 线性衰减）；`__main__` 在 3×3 训 20 万局并存 `q_table_3x3.pkl`。|
 | `play_human.py` | 人机对战，加载 `q_table_3x3.pkl`。|
 | `experiment_scaling.py` | 放大棋盘实验，实证表格法的天花板。|
-| `qnet.py` | 【阶段5.1】`encode_board(board, player)`→`(2,H,W)` 张量（图层0=我方子，图层1=对方子，按「轮到谁」的视角）；`QNetwork`（MLP，输出每格一个 Q）；含前向 demo。**网络还没训练。** |
+| `qnet.py` | 【5.1】`encode_board(board, player)`→`(2,H,W)`（图层0=我方/1=对方，按「轮到谁」视角）；`QNetwork`（MLP，每格一个 Q）。|
+| `replay.py` | 【5.3①】`ReplayBuffer`（经验回放：固定容量、随机抽样、可 seed）+ `Transition`。|
+| `train_dqn.py` | 【5.3③④】`collect_one_game`（收集转移，功劳分配照搬 train.py）+ `compute_loss`（MSE）+ `train_dqn`（训练循环：优化器三连 + 目标网络定期同步 + 存盘）。命令行选棋盘：`python train_dqn.py 5 4 6000`。|
+| `play_human_dqn.py` | 人机对战（DQN 版），加载 `dqn_*.pt`。|
+| `demo_target_net.py` / `demo_overfit_batch.py` | 【5.3②④】目标网络机制、优化器降 loss 的最小验证。|
 | `README.md` / `.gitignore` | — |
 | `test_env.ipynb` | 学生的草稿本，**未入库**，别动。|
 
@@ -80,8 +84,9 @@
 - [x] 阶段3 表格型 Q-Learning（3×3 自我对弈：胜率 58%→98.6%，**0 负**；模型存于 `q_table_3x3.pkl`）
 - [x] 阶段3.4 人机对战 + pickle 存取
 - [x] 阶段4 放大棋盘、实证表格法天花板（`experiment_scaling.py`）
-- [ ] **阶段5 DQN**：5.1 编码+Q网络 ✅ → 5.2 select_action ✅ → 5.3 训练 ✅（3×3：作黑 vs 随机 99% 胜 / 0 负，约 1/66 对局达到表格法水平）
-    - 5.3 各块：① ReplayBuffer ✅ → ② 目标网络 ✅ → ③ 收集转移 ✅ → ④ 训练循环(MSE+Adam+目标网络同步) ✅ →（下一步）**⑤ 放大到 5×5/6×6 看泛化**（表格法在那已崩）
+- [x] **阶段5 DQN** ✅：5.1 编码+Q网络 → 5.2 select_action → 5.3 训练（① ReplayBuffer ② 目标网络 ③ 收集转移 ④ 训练循环 ⑤ 放大验证泛化）全部完成
+    - 结果：3×3 作黑 98%+/0 负、作白 ~87%（≈表格法、约 1/66 对局）；**5×5(win4) 作黑 96.5%**（表格法在此 75% 局面没见过，DQN 靠泛化扛住）。
+    - 人机对战：`python play_human_dqn.py [bs] [wl]`，加载 `DQNAgent.save` 存的 `dqn_*.pt`。
 - [ ] 阶段6 MCTS + 策略/价值网络（AlphaZero 思路）
 
 ## 7. 下一步具体设计（给你的实现指引，但仍要按教学风格一步步带）
@@ -104,6 +109,7 @@
 
 - **表格 3×3**：`α=0.2, γ=0.95, ε 0.30→0.02, 20万局自我对弈`（约 20s）→ 作黑 98.6% 胜 / 0 负，作白 87.3% 胜 / 0 负。Q 表 16089 条。
 - **放大实验**（各训 4 万局）：Q 表条目 3×3=1.5万 → 4×4=175万 → 5×5=805万；「实战中没见过的局面」占比 0% → 43% → 75%（这就是必须上神经网络的实证理由）。
+- **DQN（阶段5.3）**：`γ=0.95, Adam lr=1e-3, batch=64, 目标网络每 100 步同步, ε 0.30→0.05`。3×3 自对弈 3000 局 → 作黑 98%+/0 负、作白 ~87%（≈表格法，约 1/66 对局）；**5×5(win4) 6000 局 → 作黑 96.5%**（表格法在此 75% 局面没见过，DQN 靠泛化扛住）。设备 mps/cpu。
 
 ## 9. 启动 Prompt（学生会把它粘给你；与本文件配套）
 

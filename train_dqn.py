@@ -5,14 +5,18 @@ DQN 训练器 —— 阶段 5.3
   功劳分配【完全照搬】train.py。
 · compute_loss（④a）：把一批转移算成一个 MSE 损失。
 · train_dqn（④b）：完整训练循环 = 边自对弈攒数据 + 每步抽新批做"优化器三连"
-  + 每隔 N 步同步 target + 定期拉去打随机看胜率。
+  + 每隔 N 步同步 target + 定期评估；可选 save_path 训练完存盘。
+
+命令行：
+    python train_dqn.py                 # 默认 3×3(win3)，3000 局，存 dqn_3x3.pt
+    python train_dqn.py 5 4 6000        # 5×5(win4)，6000 局，存 dqn_5x5.pt
 """
 
 from gomoku_env import GomokuEnv
 from agents import DQNAgent, RandomAgent
 from replay import ReplayBuffer
 from play import play_game
-from train import evaluate           # 直接复用表格阶段写好的评估（统一接口的好处！）
+from train import evaluate           # 复用表格阶段的评估（统一接口的好处）
 
 import torch
 from qnet import encode_board, QNetwork
@@ -35,7 +39,6 @@ def collect_one_game(env, agent, buffer):
             ps, pa = pending[p]
             buffer.push(ps, p, pa, 0.0, state, p, legal, False)
 
-        # p 选一步并落子（动作下标 = row*W + col）
         action = agent.select_action(state, legal)
         a_idx = action[0] * W + action[1]
         next_state, reward, done, _ = env.step(action)
@@ -90,13 +93,13 @@ def train_dqn(agent, n_games, board_size=3, win_length=3,
               gamma=0.95, lr=1e-3, batch_size=64,
               capacity=20000, warmup=500, sync_every=100,
               eps_start=0.30, eps_end=0.05,
-              eval_every=0, eval_opponent=None):
-    """完整 DQN 自对弈训练。返回训练好的网络（就是 agent.net）。"""
+              eval_every=0, eval_opponent=None, save_path=None):
+    """完整 DQN 自对弈训练。save_path 给了就在训练完存盘。返回训练好的网络。"""
     env = GomokuEnv(board_size, win_length)
     device = agent.device
 
     online_net = agent.net                          # agent 内部的网络 = 在线网络（被训练）
-    online_net.train()                              # 训练模式
+    online_net.train()
     target_net = QNetwork(board_size).to(device)    # 目标网络 = online 的冻结副本
     target_net.load_state_dict(online_net.state_dict())
     target_net.eval()
@@ -106,27 +109,22 @@ def train_dqn(agent, n_games, board_size=3, win_length=3,
 
     train_steps = 0
     for i in range(1, n_games + 1):
-        # ε 线性衰减：先多探索、后多凭本事（和 train.py 同思路）
-        agent.epsilon = eps_start + (eps_end - eps_start) * (i / n_games)
-
+        agent.epsilon = eps_start + (eps_end - eps_start) * (i / n_games)   # ε 线性衰减
         collect_one_game(env, agent, buffer)        # 自对弈一局，攒转移
 
-        if len(buffer) < warmup:                    # 没攒够就先别训（warm-up）
+        if len(buffer) < warmup:                    # warm-up：没攒够先别训
             continue
 
-        # —— 一个训练步：抽【新的一批】→ 优化器三连 ——
-        batch = buffer.sample(batch_size)           # ← 每步重新抽，不是固定那批！
+        batch = buffer.sample(batch_size)           # 每步重新抽一批
         loss = compute_loss(online_net, target_net, batch, gamma, device)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         train_steps += 1
 
-        # —— 每隔 sync_every 个训练步，同步一次 target ——
-        if train_steps % sync_every == 0:
+        if train_steps % sync_every == 0:           # 每隔 N 步同步 target
             target_net.load_state_dict(online_net.state_dict())
 
-        # —— 定期评估：拉去打随机，看胜率/负率 ——
         if eval_every and eval_opponent is not None and i % eval_every == 0:
             t = evaluate(agent, eval_opponent, 1000, board_size, win_length, agent_is_black=True)
             tot = sum(t.values())
@@ -134,25 +132,30 @@ def train_dqn(agent, n_games, board_size=3, win_length=3,
                   f"作黑 胜 {t['win']/tot:5.1%}  负 {t['lose']/tot:5.1%}  平 {t['draw']/tot:5.1%}")
             online_net.train()
 
+    if save_path:
+        agent.save(save_path)
+        print(f"  ✅ 模型已保存到 {save_path}")
     return online_net
 
 
 if __name__ == "__main__":
-    # 3×3 这么小的网络，CPU 往往比 MPS 还快（MPS 每次运算的调度开销在小张量上占比太大）；
-    # 等棋盘/网络变大，MPS 才显优势。
-    agent = DQNAgent(board_size=3, name="DQN", device="cpu", seed=0)
+    import sys
+    BS = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+    WL = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+    N = int(sys.argv[3]) if len(sys.argv) > 3 else 3000
+    path = f"dqn_{BS}x{BS}.pt"
+
+    # 小棋盘小网络：CPU 往往比 MPS 还快（MPS 调度开销在小张量上占比大）
+    agent = DQNAgent(board_size=BS, name="DQN", device="cpu", seed=0)
     rand = RandomAgent(seed=123)
 
-    print("===== 训练前：未训练 DQN 作黑 vs 随机（≈随机水平）=====")
-    t0 = evaluate(agent, rand, 1000, 3, 3, agent_is_black=True)
-    tot0 = sum(t0.values())
-    print(f"  胜 {t0['win']/tot0:.1%}  负 {t0['lose']/tot0:.1%}  平 {t0['draw']/tot0:.1%}")
+    print(f"===== 训练 {BS}x{BS}(win{WL}) DQN，自对弈 {N} 局 =====")
+    train_dqn(agent, n_games=N, board_size=BS, win_length=WL,
+              eval_every=max(1, N // 4), eval_opponent=rand, save_path=path)
 
-    print("\n===== 自对弈训练（看胜率往上爬、负率往下掉）=====")
-    train_dqn(agent, n_games=3000, board_size=3, win_length=3,
-              eval_every=600, eval_opponent=rand)
-
-    print("\n===== 训练后：DQN 作黑 vs 随机 =====")
-    tb = evaluate(agent, rand, 2000, 3, 3, agent_is_black=True)
-    totb = sum(tb.values())
-    print(f"  胜 {tb['win']/totb:.1%}  负 {tb['lose']/totb:.1%}  平 {tb['draw']/totb:.1%}")
+    print("\n===== 训练后 vs 随机（黑白分开看）=====")
+    b = evaluate(agent, rand, 2000, BS, WL, agent_is_black=True);  nb = sum(b.values())
+    w = evaluate(agent, rand, 2000, BS, WL, agent_is_black=False); nw = sum(w.values())
+    print(f"  作黑 胜 {b['win']/nb:.1%}  负 {b['lose']/nb:.1%}  平 {b['draw']/nb:.1%}")
+    print(f"  作白 胜 {w['win']/nw:.1%}  负 {w['lose']/nw:.1%}  平 {w['draw']/nw:.1%}")
+    print(f"\n模型在 {path}，现在可以开战： python play_human_dqn.py {BS} {WL}")
