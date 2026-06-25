@@ -63,6 +63,10 @@
 | `train_dqn.py` | 【5.3③④】`collect_one_game`（收集转移，功劳分配照搬 train.py）+ `compute_loss`（MSE）+ `train_dqn`（训练循环：优化器三连 + 目标网络定期同步 + 存盘）。命令行选棋盘：`python train_dqn.py 5 4 6000`。|
 | `play_human_dqn.py` | 人机对战（DQN 版），加载 `dqn_*.pt`。|
 | `demo_target_net.py` / `demo_overfit_batch.py` | 【5.3②④】目标网络机制、优化器降 loss 的最小验证。|
+| `aznet.py` | 【阶段6】`PolicyValueNet`：双头网络（共享躯干 + policy 头出 n_cells logits + value 头出 1 过 tanh）。复用 `qnet.encode_board`；forward 只吐 logits、softmax 留外面。|
+| `mcts.py` | 【阶段6】MCTS 引擎：`Node`(N/W/Q/P/done/winner) → `puct_score`(⚠️利用项取 **-Q**，孩子是对手视角) / `select_to_leaf` → `expand`(priors 可选，没给走均匀) → `evaluate_rollout` / `net_evaluate`(网络版，一次前向出 P 和 v) → `backpropagate`(每层**符号翻转**) → `mcts_search`(net=None 走经典 rollout、给 net 走 AlphaZero) → `MCTSAgent`(统一 select_action 接口)。|
+| `eval_mcts.py` | 【阶段6】MCTS 打随机评估（3×3）：rollout 版 / 未训练网络版 / 传入训练后 net。|
+| `train_az.py` | 【阶段6】`self_play_game`(收集 `(state,π,z)`，按 N 正比采样落子) + `examples_to_tensors` + `compute_loss`(policy 软标签交叉熵 + value MSE) + `train`(自举训练循环：自对弈→训练→再自对弈)。|
 | `README.md` / `.gitignore` | — |
 | `test_env.ipynb` | 学生的草稿本，**未入库**，别动。|
 
@@ -87,7 +91,10 @@
 - [x] **阶段5 DQN** ✅：5.1 编码+Q网络 → 5.2 select_action → 5.3 训练（① ReplayBuffer ② 目标网络 ③ 收集转移 ④ 训练循环 ⑤ 放大验证泛化）全部完成
     - 结果：3×3 作黑 98%+/0 负、作白 ~87%（≈表格法、约 1/66 对局）；**5×5(win4) 作黑 96.5%**（表格法在此 75% 局面没见过，DQN 靠泛化扛住）。
     - 人机对战：`python play_human_dqn.py [bs] [wl]`，加载 `DQNAgent.save` 存的 `dqn_*.pt`。
-- [ ] 阶段6 MCTS + 策略/价值网络（AlphaZero 思路）
+- [x] **阶段6 AlphaZero（MCTS + 策略/价值网络）** ✅
+    - 链路：MCTS 四步（PUCT 选择 / 扩展 / 评估 / 回传）→ 双头网络（policy+value）→ 自对弈生成 `(state,π,z)` → 双头 loss（policy 软标签交叉熵 + value MSE）→ 自举训练。
+    - 3×3 验证：纯 rollout MCTS（零训练、零网络）作黑 **100%/0负**、作白 90%；训练后网络版 MCTS 作黑 **100%/0负**（从未训练的 96% 反超）、作白 86%。
+    - ⚠️ TODO：执白 86% 还可提升 —— 更多自对弈轮 / minibatch 采样 / 温度调度 / value loss 加权或 L2 正则；放大到 6×6+ 验证泛化；存模型 + 人机对战（仿 `play_human_dqn.py`）。
 
 ## 7. 下一步具体设计（给你的实现指引，但仍要按教学风格一步步带）
 
@@ -110,6 +117,7 @@
 - **表格 3×3**：`α=0.2, γ=0.95, ε 0.30→0.02, 20万局自我对弈`（约 20s）→ 作黑 98.6% 胜 / 0 负，作白 87.3% 胜 / 0 负。Q 表 16089 条。
 - **放大实验**（各训 4 万局）：Q 表条目 3×3=1.5万 → 4×4=175万 → 5×5=805万；「实战中没见过的局面」占比 0% → 43% → 75%（这就是必须上神经网络的实证理由）。
 - **DQN（阶段5.3）**：`γ=0.95, Adam lr=1e-3, batch=64, 目标网络每 100 步同步, ε 0.30→0.05`。3×3 自对弈 3000 局 → 作黑 98%+/0 负、作白 ~87%（≈表格法，约 1/66 对局）；**5×5(win4) 6000 局 → 作黑 96.5%**（表格法在此 75% 局面没见过，DQN 靠泛化扛住）。设备 mps/cpu。
+- **AlphaZero（阶段6）**：3×3，`c_puct=1, n_simulations=100~200`。① 纯 rollout MCTS（零训练、零网络）作黑 **100%/0负**、作白 90%/1负 —— 搜索本身即强（追平/超过训练后的表格法、DQN）。② 自举训练 `iterations=15, games/iter=10, n_sim=100, epochs/iter=10, Adam lr=1e-3`：policy_loss 2.2(≈log9)→1.4、value_loss→低；训练后网络版作黑 **100%/0负**（从未训练 96% 反超）、作白 86%。设备 cpu（3×3 小，cpu 比 mps 快）。
 
 ## 9. 启动 Prompt（学生会把它粘给你；与本文件配套）
 
