@@ -11,9 +11,9 @@ from play import play_game
 from mcts import MCTSAgent
 
 
-def run(n, mcts_is_black, n_sim=200, net=None):
-    env = GomokuEnv(3, 3)
-    mcts = MCTSAgent(3, 3, n_simulations=n_sim, seed=0, net=net, device="cpu")
+def run(n, mcts_is_black, n_sim=200, net=None, board_size=3, win_length=3):
+    env = GomokuEnv(board_size, win_length)
+    mcts = MCTSAgent(board_size, win_length, n_simulations=n_sim, seed=0, net=net, device="cpu")
     rand = RandomAgent("随机", seed=1)
     black, white = (mcts, rand) if mcts_is_black else (rand, mcts)
     tally = Counter()

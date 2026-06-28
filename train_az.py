@@ -18,6 +18,7 @@ from gomoku_env import GomokuEnv
 from qnet import encode_board
 from aznet import PolicyValueNet
 from mcts import mcts_search, _infer_player
+from augment import augment_example
 
 
 def self_play_game(net, board_size, win_length, n_simulations, c_puct, rng, device="cpu"):
@@ -84,13 +85,15 @@ def compute_loss(net, X, PI, Z):
 
 
 def train(board_size, win_length, iterations, games_per_iter, n_simulations,
-          c_puct, epochs_per_iter, lr, seed, device="cpu"):
+          c_puct, epochs_per_iter, lr, seed, device="cpu", net=None, augment=False):
     """
     AlphaZero 自举训练循环：反复 {用当前网络自对弈攒数据 → 拿数据训练网络}。
     每轮数据都来自【上一轮训练后】的网络——网络越强、棋谱越好、训练目标越好……滚雪球。
     返回训练好的网络。
     """
-    net = PolicyValueNet(board_size).to(device)
+    if net is None:                                 # 默认 MLP（向后兼容 3×3 老实验）
+        net = PolicyValueNet(board_size)
+    net = net.to(device)                            # 传进来的 CNN / MLP 都走这里上设备
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     rng = random.Random(seed)
     for it in range(iterations):
@@ -100,6 +103,12 @@ def train(board_size, win_length, iterations, games_per_iter, n_simulations,
         for _ in range(games_per_iter):
             data += self_play_game(net, board_size, win_length,
                                    n_simulations, c_puct, rng, device)
+        # 1.5) 对称性数据增强：每条样本 → 8 条等价（D4 全对称），修朝向盲区
+        if augment:
+            aug = []
+            for s, pi, z in data:
+                aug += augment_example(s, pi, z, board_size)
+            data = aug
         # 2) 拿这批数据做若干步梯度下降
         net.train()
         X, PI, Z = examples_to_tensors(data, device)

@@ -67,6 +67,12 @@
 | `mcts.py` | 【阶段6】MCTS 引擎：`Node`(N/W/Q/P/done/winner) → `puct_score`(⚠️利用项取 **-Q**，孩子是对手视角) / `select_to_leaf` → `expand`(priors 可选，没给走均匀) → `evaluate_rollout` / `net_evaluate`(网络版，一次前向出 P 和 v) → `backpropagate`(每层**符号翻转**) → `mcts_search`(net=None 走经典 rollout、给 net 走 AlphaZero) → `MCTSAgent`(统一 select_action 接口)。|
 | `eval_mcts.py` | 【阶段6】MCTS 打随机评估（3×3）：rollout 版 / 未训练网络版 / 传入训练后 net。|
 | `train_az.py` | 【阶段6】`self_play_game`(收集 `(state,π,z)`，按 N 正比采样落子) + `examples_to_tensors` + `compute_loss`(policy 软标签交叉熵 + value MSE) + `train`(自举训练循环：自对弈→训练→再自对弈)。|
+| `aznet_cnn.py` | 【阶段7】`PolicyValueNetCNN`：**CNN 双头网**——卷积躯干(3×Conv3×3+ReLU、padding=1、**与盘大小解耦**) + **1×1 卷积 policy 头**(逐格出 logit) + **flatten+Linear value 头**(跨格汇总→tanh)。接口同 `aznet.py`，可直接替换塞进 `mcts/train_az`。|
+| `train_az_cnn.py` | 【阶段7】6×6(win4) CNN 训练入口，复用 `train_az.train(net=注入)`。`python train_az_cnn.py [iters] [eval_games]`，存 `az_cnn_6x6.pt`。|
+| `play_human_az_cnn.py` | 【阶段7】人机对战（AZ-CNN）：加载 `az_cnn_6x6.pt`→`MCTSAgent(net=...)`。`python play_human_az_cnn.py 6 4 模型 n_sim`（n_sim 调小≈看网络原始直觉）。|
+| `eval_net_vs_rollout.py` | 【阶段7·诊断】训练后网络版 MCTS vs 纯 rollout 版（**同 n_sim**）头对头——剥离"搜索"单看"网络"。结果 黑90%/白75%。|
+| `diag_tactics.py` / `diag_tactics2.py` | 【阶段7·诊断】固定战术体检：必防局面的 policy 排名 + 各 sim 的 P/N/Q + net/rollout 对照；**diag_tactics2** 用旋转/镜像生成横竖主反对角**等价**局面，证实**朝向等变性盲区**。|
+| `demo_conv_shape.py` / `smoke_az_cnn.py` | 【阶段7】Conv2d 形状/padding 最小实验；CNN 接入训练链的冒烟测试。|
 | `README.md` / `.gitignore` | — |
 | `test_env.ipynb` | 学生的草稿本，**未入库**，别动。|
 
@@ -95,6 +101,14 @@
     - 链路：MCTS 四步（PUCT 选择 / 扩展 / 评估 / 回传）→ 双头网络（policy+value）→ 自对弈生成 `(state,π,z)` → 双头 loss（policy 软标签交叉熵 + value MSE）→ 自举训练。
     - 3×3 验证：纯 rollout MCTS（零训练、零网络）作黑 **100%/0负**、作白 90%；训练后网络版 MCTS 作黑 **100%/0负**（从未训练的 96% 反超）、作白 86%。
     - ⚠️ TODO：执白 86% 还可提升 —— 更多自对弈轮 / minibatch 采样 / 温度调度 / value loss 加权或 L2 正则；放大到 6×6+ 验证泛化；存模型 + 人机对战（仿 `play_human_dqn.py`）。
+- [~] **阶段7 放大到 6×6 + 网络 MLP→CNN**（进行中）
+    - **CNN 双头网** `aznet_cnn.py`：卷积躯干（局部连接+权重共享→**与盘大小解耦**）+ 1×1 逐格 policy 头 + flatten/Linear 全局 value 头。接口同 MLP 版，`mcts.py` 零改即可用。
+    - **接线**：`train_az.train()` 加可注入 `net=None`（默认仍造 MLP，向后兼容 3×3）；`eval_mcts.run()` 加 `board_size/win_length`（默认 3×3）。
+    - **训练**（`train_az_cnn.py`，6×6 win4，`iters=20/games=20/n_sim=200/epochs=10`，cpu，~70s/轮）：policy 3.58→1.66、value→~0.26；打随机 作黑/作白 **均 100%**；存 `az_cnn_6x6.pt`。
+    - ⚠️ **"打随机 100%"是假象**：网络版 MCTS 同 n_sim 能赢纯 rollout（黑90%/白75%，证明确实学到了东西），**却被随手织威胁的人类轻松击败**。
+    - 🔬 **诊断结论（核心）**：`diag_tactics.py`/`diag_tactics2.py` 固定局面体检 + 旋转镜像等价对照 → **不是 bug**（控制组横向必防完美），是 **朝向等变性盲区**：同一棋形**横向学透、竖向半生、对角基本不会**（横 vs 它转 90° 的竖，value 从 −0.92 翻到 +0.01）。根因 = **无对称数据增强 + 自对弈不足**；卷积只平移不变、不旋转不变。
+    - 🛠️ **B 路线图**（从零学、"撞了再修"、每步回旧诊断验收）：**B1 8 重对称数据增强**（最对症、先做）→ B2 温度调度（self-play 落子）→ B3 根节点 Dirichlet 噪声（**仅 self-play**）→ B4 回放缓冲+minibatch → B5 上规模长训+全套复检 →（选修）B6 残差块/更大棋盘。
+    - **当前位置：B1 待开始**（拟在新 session 接力；本会话已落盘到此）。
 
 ## 7. 下一步具体设计（给你的实现指引，但仍要按教学风格一步步带）
 
@@ -118,6 +132,7 @@
 - **放大实验**（各训 4 万局）：Q 表条目 3×3=1.5万 → 4×4=175万 → 5×5=805万；「实战中没见过的局面」占比 0% → 43% → 75%（这就是必须上神经网络的实证理由）。
 - **DQN（阶段5.3）**：`γ=0.95, Adam lr=1e-3, batch=64, 目标网络每 100 步同步, ε 0.30→0.05`。3×3 自对弈 3000 局 → 作黑 98%+/0 负、作白 ~87%（≈表格法，约 1/66 对局）；**5×5(win4) 6000 局 → 作黑 96.5%**（表格法在此 75% 局面没见过，DQN 靠泛化扛住）。设备 mps/cpu。
 - **AlphaZero（阶段6）**：3×3，`c_puct=1, n_simulations=100~200`。① 纯 rollout MCTS（零训练、零网络）作黑 **100%/0负**、作白 90%/1负 —— 搜索本身即强（追平/超过训练后的表格法、DQN）。② 自举训练 `iterations=15, games/iter=10, n_sim=100, epochs/iter=10, Adam lr=1e-3`：policy_loss 2.2(≈log9)→1.4、value_loss→低；训练后网络版作黑 **100%/0负**（从未训练 96% 反超）、作白 86%。设备 cpu（3×3 小，cpu 比 mps 快）。
+- **AlphaZero+CNN（阶段7）**：6×6 win4，`iters=20, games/iter=20, n_sim=200, epochs/iter=10, Adam lr=1e-3`，cpu ~70s/轮。policy 3.56→1.66(≈log36 起步)、value 0.98→0.26；网络版 MCTS 打随机 黑/白均 100%；同 n_sim 头对头 **网络 vs rollout = 黑 90% / 白 75%**。⚠️ 仍被人类轻松赢 → 诊断为**朝向等变性盲区**（详见 §6 阶段7）。对弈 `n_sim=400`、`n_sim=10` 看网络原始直觉。
 
 ## 9. 启动 Prompt（学生会把它粘给你；与本文件配套）
 
