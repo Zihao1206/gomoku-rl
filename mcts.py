@@ -186,8 +186,17 @@ def net_evaluate(state, legal_actions, net, device):
     return priors, float(value.item())
 
 
+def _dirichlet_noise(alpha, k, rng):
+    """从 Dirichlet(alpha) 抽一个长度 k、和为 1 的随机向量（当 η 用）。
+       标准造法：抽 k 个独立 Gamma(alpha,1)、再除以总和归一化——这正是「能吐出
+       和为 1 随机向量」的来历，且只用 random.Random，可复现、不引新依赖。"""
+    g = [rng.gammavariate(alpha, 1.0) for _ in range(k)]
+    s = sum(g)
+    return [x / s for x in g]
+
+
 def mcts_search(root_state, n_simulations, board_size, win_length, c_puct, rng,
-                net=None, device="cpu"):
+                net=None, device="cpu", dir_eps=0.0, dir_alpha=0.3):
     """
     一次完整的 MCTS 决策：从 root_state 跑 n_simulations 次模拟，
     返回 (最佳动作, 根节点)。最佳 = 根下【访问次数 N 最大】的孩子。
@@ -209,6 +218,12 @@ def mcts_search(root_state, n_simulations, board_size, win_length, c_puct, rng,
             legal = [(int(r), int(c)) for r, c in np.argwhere(leaf.state == 0)]
             priors, v = net_evaluate(leaf.state, legal, net, device)
             expand(leaf, board_size, win_length, priors=priors)
+            # 【B3】仅 self-play(dir_eps>0)：给【根节点】孩子先验掺 Dirichlet 噪声，
+            #       强行抬高被网络冷落的手、逼搜索去试。leaf is root → 只加一次、只在根。
+            if leaf is root and dir_eps > 0:
+                noise = _dirichlet_noise(dir_alpha, len(legal), rng)
+                for a, nz in zip(legal, noise):
+                    root.children[a].P = (1 - dir_eps) * root.children[a].P + dir_eps * nz
         backpropagate(leaf, v)                                       # ⑤ 回传
     best_action = max(root.children.items(), key=lambda kv: kv[1].N)[0]
     return best_action, root

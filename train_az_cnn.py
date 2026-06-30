@@ -21,6 +21,13 @@ GAMES_PER_ITER = 20          # 6×6 起步配方（见上一步讨论）
 N_SIM = 200
 EPOCHS_PER_ITER = 10
 LR = 1e-3
+TEMP_MOVES = 4               # 【B2】温度调度：前 4 手高温采样、之后走 argmax
+DIR_EPS = 0.25               # 【B3】根节点 Dirichlet 噪声占比（仅 self-play）
+DIR_ALPHA = 0.3              # 【B3】噪声集中度（≈10/合法手数，6×6 偏温和集中）
+USE_BUFFER = True            # 【B4】用回放池 + minibatch（替代整批全量梯度）
+BUFFER_CAP = 40000           # 【B4/B5】池容量；B5 长训加大，防稀有防守样本被过早挤掉
+BATCH_SIZE = 256             # 【B4】minibatch 大小
+TRAIN_STEPS = 50             # 【B4】每轮从池里抽多少个 minibatch 训
 DEVICE = "cpu"
 
 iterations = int(sys.argv[1]) if len(sys.argv) > 1 else 20
@@ -32,7 +39,10 @@ print("=== AlphaZero+CNN 训练 (6×6, win4) | iters=%d  games/iter=%d  n_sim=%d
 net = PolicyValueNetCNN(BS)
 net = train(BS, WL, iterations=iterations, games_per_iter=GAMES_PER_ITER,
             n_simulations=N_SIM, c_puct=1.0, epochs_per_iter=EPOCHS_PER_ITER,
-            lr=LR, seed=0, device=DEVICE, net=net, augment=True)
+            lr=LR, seed=0, device=DEVICE, net=net, augment=True,
+            temp_moves=TEMP_MOVES, dir_eps=DIR_EPS, dir_alpha=DIR_ALPHA,
+            use_buffer=USE_BUFFER, buffer_capacity=BUFFER_CAP,
+            batch_size=BATCH_SIZE, train_steps=TRAIN_STEPS)
 
 torch.save(net.state_dict(), "az_cnn_6x6.pt")
 print("\n模型已存 az_cnn_6x6.pt")

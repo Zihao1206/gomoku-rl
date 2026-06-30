@@ -9,6 +9,7 @@
 """
 
 import random
+from collections import deque
 
 import numpy as np
 import torch
@@ -21,32 +22,51 @@ from mcts import mcts_search, _infer_player
 from augment import augment_example
 
 
-def self_play_game(net, board_size, win_length, n_simulations, c_puct, rng, device="cpu"):
+def self_play_game(net, board_size, win_length, n_simulations, c_puct, rng,
+                   device="cpu", temp_moves=4, verbose=False,
+                   dir_eps=0.25, dir_alpha=0.3):
     """
     自我对弈一整局，返回训练样本列表 [(state, pi, z), ...]：
         state : 该步的棋盘（numpy 副本）
         pi    : MCTS 访问分布，长度 n_cells 的概率向量（N 归一化；非法/没访问的格 = 0）
         z     : 这局最终结果，站【该局面落子方】视角：赢 +1 / 输 -1 / 平 0
-    落子按访问次数【正比采样】（不取 N 最大），制造棋谱多样性——和 ε-贪婪一个道理。
+    【B2 温度调度】落子分两段：前 temp_moves 手按访问数【正比采样】(高温/探索，
+    制造开局多样性)；第 temp_moves+1 手起改走访问数最大的那手 (argmax/低温/走最优，
+    把残局走干净，以免随机走输污染整局的 z 标签)。
+    注意：存进 records 的 pi 始终是 τ=1 的访问分布(软标签)，【不随温度变】——
+    温度只决定"实际落哪一步"，不动 policy 头的训练目标。
     """
     env = GomokuEnv(board_size, win_length)
     state = env.reset()
     records = []                                       # (state, pi, 该步落子方)
+    move_count = 0                                     # 这局下到第几手（从 0 起，循环外初始化）
     while not env.done:
         # 跑一次网络版 MCTS，从根拿访问分布
         _, root = mcts_search(state, n_simulations, board_size, win_length,
-                              c_puct, rng, net=net, device=device)
+                              c_puct, rng, net=net, device=device,
+                              dir_eps=dir_eps, dir_alpha=dir_alpha)
         pi = np.zeros(board_size * board_size, dtype=np.float32)
         for (r, c), ch in root.children.items():
             pi[r * board_size + c] = ch.N
-        pi /= pi.sum()                                 # 归一化成概率分布
+        pi /= pi.sum()                                 # 归一化成概率分布（软标签，不随温度变）
         records.append((state.copy(), pi, env.current_player))
 
-        # 按 N 正比采样落子（探索）
+        # 【B2 温度调度】前 temp_moves 手高温采样、之后 argmax
         actions = list(root.children.keys())
         weights = [root.children[a].N for a in actions]
-        action = rng.choices(actions, weights=weights)[0]
+        if move_count < temp_moves:
+            action = rng.choices(actions, weights=weights)[0]   # ∝N 采样（高温/探索）
+        else:
+            best_i = weights.index(max(weights))                # 访问数最大者的下标
+            action = actions[best_i]                            # 取那一手（argmax/低温）
+        if verbose:                                             # 调试观察：这一手走了哪支
+            best_a = actions[weights.index(max(weights))]
+            branch = "采样  " if move_count < temp_moves else "argmax"
+            print("  手%2d [%s] 落子=%s  访问最大=%s  weights=%s"
+                  % (move_count + 1, branch, action, best_a,
+                     [int(w) for w in weights]))
         state, _, _, _ = env.step(action)
+        move_count += 1                                # 走完一手，计数 +1
 
     # 整局结束，按最终胜负给每条样本贴 z（站各局面落子方视角）
     winner = env.winner
@@ -85,7 +105,9 @@ def compute_loss(net, X, PI, Z):
 
 
 def train(board_size, win_length, iterations, games_per_iter, n_simulations,
-          c_puct, epochs_per_iter, lr, seed, device="cpu", net=None, augment=False):
+          c_puct, epochs_per_iter, lr, seed, device="cpu", net=None, augment=False,
+          temp_moves=4, dir_eps=0.25, dir_alpha=0.3,
+          use_buffer=False, buffer_capacity=20000, batch_size=256, train_steps=30):
     """
     AlphaZero 自举训练循环：反复 {用当前网络自对弈攒数据 → 拿数据训练网络}。
     每轮数据都来自【上一轮训练后】的网络——网络越强、棋谱越好、训练目标越好……滚雪球。
@@ -96,29 +118,45 @@ def train(board_size, win_length, iterations, games_per_iter, n_simulations,
     net = net.to(device)                            # 传进来的 CNN / MLP 都走这里上设备
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     rng = random.Random(seed)
+    buffer = deque(maxlen=buffer_capacity)          # 【B4】回放池：use_buffer=True 时启用
     for it in range(iterations):
         # 1) 自对弈收集数据（用当前网络）
         net.eval()
         data = []
         for _ in range(games_per_iter):
             data += self_play_game(net, board_size, win_length,
-                                   n_simulations, c_puct, rng, device)
+                                   n_simulations, c_puct, rng, device,
+                                   temp_moves=temp_moves,
+                                   dir_eps=dir_eps, dir_alpha=dir_alpha)
         # 1.5) 对称性数据增强：每条样本 → 8 条等价（D4 全对称），修朝向盲区
         if augment:
             aug = []
             for s, pi, z in data:
                 aug += augment_example(s, pi, z, board_size)
             data = aug
-        # 2) 拿这批数据做若干步梯度下降
+        # 2) 训练：B4 用回放池抽 minibatch；否则（旧逻辑）整批做 epochs 次全量梯度
         net.train()
-        X, PI, Z = examples_to_tensors(data, device)
-        for _ in range(epochs_per_iter):
-            optimizer.zero_grad()
-            total, pl, vl = compute_loss(net, X, PI, Z)
-            total.backward()
-            optimizer.step()
-        print("iter %2d | 样本 %3d | policy=%.3f  value=%.3f  total=%.3f"
-              % (it, len(data), pl.item(), vl.item(), total.item()))
+        if use_buffer:
+            buffer.extend(data)                     # 【B4】新数据进池（不直接训这批、也不丢）
+            pool = list(buffer)                     # 转一次 list，下面多次抽样复用
+            for _ in range(train_steps):            # 每轮抽 train_steps 个 minibatch 训
+                batch = rng.sample(pool, min(batch_size, len(pool)))   # 随机抽→打破相关性
+                X, PI, Z = examples_to_tensors(batch, device)
+                optimizer.zero_grad()
+                total, pl, vl = compute_loss(net, X, PI, Z)
+                total.backward()
+                optimizer.step()
+            print("iter %2d | 池 %5d | policy=%.3f  value=%.3f  total=%.3f"
+                  % (it, len(buffer), pl.item(), vl.item(), total.item()))
+        else:
+            X, PI, Z = examples_to_tensors(data, device)
+            for _ in range(epochs_per_iter):
+                optimizer.zero_grad()
+                total, pl, vl = compute_loss(net, X, PI, Z)
+                total.backward()
+                optimizer.step()
+            print("iter %2d | 样本 %3d | policy=%.3f  value=%.3f  total=%.3f"
+                  % (it, len(data), pl.item(), vl.item(), total.item()))
     return net
 
 
