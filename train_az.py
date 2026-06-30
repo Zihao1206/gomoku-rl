@@ -8,6 +8,7 @@
     · value  头学着去预测 z（这局最终的真实胜负）
 """
 
+import os
 import random
 from collections import deque
 
@@ -107,11 +108,18 @@ def compute_loss(net, X, PI, Z):
 def train(board_size, win_length, iterations, games_per_iter, n_simulations,
           c_puct, epochs_per_iter, lr, seed, device="cpu", net=None, augment=False,
           temp_moves=4, dir_eps=0.25, dir_alpha=0.3,
-          use_buffer=False, buffer_capacity=20000, batch_size=256, train_steps=30):
+          use_buffer=False, buffer_capacity=20000, batch_size=256, train_steps=30,
+          checkpoint_path=None, checkpoint_every=0, resume=False):
     """
     AlphaZero 自举训练循环：反复 {用当前网络自对弈攒数据 → 拿数据训练网络}。
     每轮数据都来自【上一轮训练后】的网络——网络越强、棋谱越好、训练目标越好……滚雪球。
     返回训练好的网络。
+
+    【阶段8 checkpoint 断点续训】（默认全关，不影响 3×3/6×6 旧调用）：
+        checkpoint_path  : 存盘路径（None=不存）
+        checkpoint_every : 每隔几轮存一次（0=不存）；最后一轮总会存
+        resume           : True 且 checkpoint_path 存在时，从断点恢复
+                           网络权重 + 优化器状态(Adam动量) + 下一轮序号 + 回放池 + rng
     """
     if net is None:                                 # 默认 MLP（向后兼容 3×3 老实验）
         net = PolicyValueNet(board_size)
@@ -119,7 +127,29 @@ def train(board_size, win_length, iterations, games_per_iter, n_simulations,
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     rng = random.Random(seed)
     buffer = deque(maxlen=buffer_capacity)          # 【B4】回放池：use_buffer=True 时启用
-    for it in range(iterations):
+
+    # —— 断点续训：把上次存的四样东西原样恢复，做到"无缝接上" ——
+    start_iter = 0
+    if resume and checkpoint_path and os.path.exists(checkpoint_path):
+        # weights_only=False：我们的 ckpt 里有 numpy/rng 等非张量对象，需完整反序列化（自存自读、可信）
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        net.load_state_dict(ckpt["net"])
+        optimizer.load_state_dict(ckpt["optimizer"])   # 恢复 Adam 一阶/二阶动量，避免退化成裸 SGD
+        buffer.extend(ckpt["buffer"])                  # 恢复回放池（含稀有防守样本）
+        rng.setstate(ckpt["rng"])                      # 恢复随机数状态，序列可复现
+        start_iter = ckpt["iter"]                      # 从"下一轮"接着跑
+        print("[续训] 从 %s 恢复：下一轮=%d，池=%d" % (checkpoint_path, start_iter, len(buffer)))
+
+    def _save_ckpt(next_iter):
+        torch.save({
+            "iter": next_iter,                         # 下次该从第几轮开始
+            "net": net.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "buffer": list(buffer),
+            "rng": rng.getstate(),
+        }, checkpoint_path)
+
+    for it in range(start_iter, iterations):
         # 1) 自对弈收集数据（用当前网络）
         net.eval()
         data = []
@@ -157,6 +187,12 @@ def train(board_size, win_length, iterations, games_per_iter, n_simulations,
                 optimizer.step()
             print("iter %2d | 样本 %3d | policy=%.3f  value=%.3f  total=%.3f"
                   % (it, len(data), pl.item(), vl.item(), total.item()))
+
+        # —— 存 checkpoint：每 checkpoint_every 轮存一次，最后一轮也总存 ——
+        if checkpoint_path and checkpoint_every and \
+           ((it + 1) % checkpoint_every == 0 or it + 1 == iterations):
+            _save_ckpt(it + 1)
+            print("   ↳ checkpoint 已存 %s (iter=%d)" % (checkpoint_path, it + 1))
     return net
 
 

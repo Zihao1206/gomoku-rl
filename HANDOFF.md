@@ -119,7 +119,17 @@
     - ✅ **B5 已做**（上规模长训）：iters 20→**50**、buffer_capacity 20000→**40000**（防稀有样本被挤掉），其余不变，约 1h。
         - 验收(`diag_tactics2`)：**四向防守全面建立**！Test2 横/竖/主对角/反对角必防点**全部 policy #1 + MCTS ✅**（B4 时对角还 #7/#8/❌）；Test1 局面1(纯防守) MCTS 也 ✅（B4 ❌）、局面2 稳 ✅。loss policy→2.06、value→0.33(不崩0)。
         - ⚠️ **残留 nuance**：四向必防局面 value 仍 −0.95~−1.00，但与阶段7 最初的"负"**质不同**——最初是"**不会防**的悲观闭环"，现在是"**会防了**、但诚实评估后手在 6×6 先手局仍劣势"（policy/行为已质变；value 负 = 对后手劣势的正确判断 + 或许一点 on-policy 悲观残留）。
-    - 🎯 **B 路线图收官**：B1 朝向增强 → B2 温度调度(清 z 噪声·没救回) → B3 根噪声(撒探索·方向对剂量不够) → B4 回放缓冲(存住稀有样本·横竖破) → B5 长训(给足量·四向全破)。把"四向不会防、value 全 −1 悲观闭环"一步步砸成"四向都会防"。**阶段7 防守盲区主线达成。** 选修后续：B6 残差块/更大棋盘(15×15)、或针对 value 残留悲观再训。
+    - 🎯 **B 路线图收官**：B1 朝向增强 → B2 温度调度(清 z 噪声·没救回) → B3 根噪声(撒探索·方向对剂量不够) → B4 回放缓冲(存住稀有样本·横竖破) → B5 长训(给足量·四向全破)。把"四向不会防、value 全 −1 悲观闭环"一步步砸成"四向都会防"。**阶段7 防守盲区主线达成。**
+    - [ ] **下一步（学生 2026-06-30 已定）：阶段8 放大到 15×15 标准五子棋（win5）** —— 关键设计点（给接手 session）：① 网络升级为**残差网络 ResBlock**（6×6 的浅 CNN 不够深，改 `aznet_cnn.py`）；② `win_length=5`（不再是 win4）；③ 训练量大增(iters 几百 / games 几十 / n_sim 几百~千)、**device 改 mps**（15×15+深网单次前向大、GPU 终于划算）；④ 长训可能数小时~数天，加 **checkpoint 存/续训**（防中断前功尽弃——本阶段就遇过训练被 kill）；⑤ `diag_tactics2` 写死 6×6，需**泛化/新写** 15×15 版。按教学风格一步步：先升级网络(残差块)→小规模冒烟→再上规模长训。（另一可选：先打磨 6×6 的 value 残留悲观 / 后手弱 / 对角弱。）
+
+- [~] **阶段8 放大到 15×15（win5）+ 残差网络**（脚手架已完成，长训待跑 2026-06-30）
+    - **①残差网** `aznet_resnet.py`：`ResBlock`（标准 AlphaZero 块 `conv→BN→ReLU→conv→BN→+x→ReLU`；通道恒定才能 +x）+ `PolicyValueNetResNet(board_size, channels, num_blocks)`（`stem(2→C conv+BN) + N×ResBlock + 1×1 policy头 + 1×1+flatten+Linear value头`）。接口同 `aznet_cnn.py` → `mcts.py`/`train_az.py` 零改注入。只有 value 头 Linear(n_cells→·) 认死盘大小，躯干全卷积与盘解耦。**新建文件，不动阶段7 的 `aznet_cnn.py`**（保 6×6 可复现）。
+    - **②③冒烟** `smoke_az_resnet.py`：残差网+15×15 训练链全程通。⚠️ **实测推翻要点③的 mps 假设**：AZ 自对弈是 **batch=1** 逐局面前向，GPU 并行用不上、反被启动/搬运开销拖累 → **Mac 上 cpu 比 mps 快 ~3 倍**（同冒烟 cpu 25s vs mps 78s）。结论：**不用 mps**；Mac 落 cpu，4070 用 cuda（大 batch 训练那步才划算）。
+    - **④checkpoint 断点续训**：`train_az.train()` 加 `checkpoint_path/checkpoint_every/resume`（默认全关，不动 3×3/6×6 旧调用）。存**四样**=网络权重+优化器状态(Adam 动量，不存退化裸SGD抖一下)+下一轮序号+回放池(B4 稀有防守样本)+rng；`torch.load(weights_only=False)`。已最小验证无缝续训（全新 net 对象 resume→恢复轮序/池/权重，不从 0 重来）。
+    - **⑤diag 泛化** `diag_tactics_15x15.py`：Test2 四向（横/竖/主/反对角，rot90+fliplr 严格等价）必防局面从"3 连"改"**4 连·单端·唯一防守点**"；自动断言全过（仪器机械正确）；模型不存在时用随机网跑（仅验证仪器，等长训后 `python diag_tactics_15x15.py` 量四向防守）。
+    - **正式入口** `train_az_resnet.py [iters] [resume]`：设备**自动检测**（cuda 优先，否则 cpu，**不碰 mps**）→ 两台机器同一份代码。产出 `az_resnet_15x15.ckpt`(每轮存)/`az_resnet_15x15.pt`(最终)。
+    - 🎯 **决策（学生 2026-06-30）：长训在 4070(CUDA) 上跑、"尽量强"配方**。当前默认强配方：`channels=128, num_blocks=7（~209万参数）, n_sim=400, games/iter=25, iters=200, buffer=20万, batch=512, train_steps=200`。
+    - [ ] **待跑**：4070 上 `git pull` → `python train_az_resnet.py 200`（断了 `... 200 resume`）→ 训完用 `diag_tactics_15x15.py` 验收四向防守。**长训前建议**：先跑中等规模"学习性冒烟"确认 loss 降 + 四向至少一向冒头，再 all-in。
 
 ## 7. 下一步具体设计（给你的实现指引，但仍要按教学风格一步步带）
 
